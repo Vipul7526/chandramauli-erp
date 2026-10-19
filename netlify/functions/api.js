@@ -772,10 +772,11 @@ exports.handler = async (event, context) => {
     // -------------------------------------------------------------------------
     if (path === '/auth/status') {
       const { data: sec } = await supabase.from('app_security').select('admin_email, is_configured, pin_code, pin_required, device_lock_enrolled').limit(1).maybeSingle();
+      const hasPin = !!(sec && sec.pin_code && sec.pin_code.trim().length >= 4);
       return jsonResponse(200, {
         configured: !!(sec && sec.is_configured),
         registeredEmail: sec ? sec.admin_email : null,
-        hasPin: !!(sec && sec.pin_code),
+        hasPin,
         pinRequired: !!(sec && sec.pin_required),
         deviceLockEnrolled: !!(sec && sec.device_lock_enrolled),
       });
@@ -797,8 +798,8 @@ exports.handler = async (event, context) => {
       const upsertPayload = {
         id: '00000000-0000-0000-0000-000000000001',
         admin_email: admin_email.trim().toLowerCase(),
-        password_hash: (password || pin_code || '1234').trim(),
-        pin_code: pin_code ? pin_code.toString().trim() : null,
+        password_hash: (password || pin_code || 'DEVICE_LOCK_MODE').trim(),
+        pin_code: (pin_code && pin_code.toString().trim().length >= 4) ? pin_code.toString().trim() : null,
         pin_required: !!pin_required,
         device_lock_enrolled: !!device_lock_enrolled,
         is_configured: true,
@@ -818,8 +819,8 @@ exports.handler = async (event, context) => {
           .upsert({
             id: '00000000-0000-0000-0000-000000000001',
             admin_email: admin_email.trim().toLowerCase(),
-            password_hash: (password || pin_code || '1234').trim(),
-            pin_code: pin_code ? pin_code.toString().trim() : null,
+            password_hash: (password || pin_code || 'DEVICE_LOCK_MODE').trim(),
+            pin_code: (pin_code && pin_code.toString().trim().length >= 4) ? pin_code.toString().trim() : null,
             is_configured: true,
             updated_at: new Date().toISOString(),
           })
@@ -830,14 +831,14 @@ exports.handler = async (event, context) => {
         return jsonResponse(200, {
           message: 'Security credentials saved successfully',
           email: fbData.admin_email,
-          hasPin: !!fbData.pin_code,
+          hasPin: !!(fbData.pin_code && fbData.pin_code.trim().length >= 4),
         });
       }
 
       return jsonResponse(200, {
         message: 'Security credentials saved successfully',
         email: data.admin_email,
-        hasPin: !!data.pin_code,
+        hasPin: !!(data.pin_code && data.pin_code.trim().length >= 4),
         pinRequired: data.pin_required,
         deviceLockEnrolled: data.device_lock_enrolled,
       });
@@ -852,7 +853,11 @@ exports.handler = async (event, context) => {
         return jsonResponse(200, { verified: true, message: 'No security credentials set yet' });
       }
 
-      const isValid = (sec.password_hash === input) || (sec.pin_code && sec.pin_code.trim() === input);
+      if (!sec.pin_code && (sec.password_hash === 'DEVICE_LOCK_MODE' || sec.password_hash === 'DEVICE_LOCK_ONLY')) {
+        return jsonResponse(400, { verified: false, error: 'No in-app PIN configured. Please unlock using your device screen lock or biometrics.' });
+      }
+
+      const isValid = (sec.pin_code && sec.pin_code.trim() === input) || (sec.password_hash && sec.password_hash.trim() === input && sec.password_hash !== 'DEVICE_LOCK_MODE');
       if (!isValid) {
         return jsonResponse(401, { verified: false, error: 'Incorrect PIN or password' });
       }
