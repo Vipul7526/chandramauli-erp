@@ -507,12 +507,30 @@ ALTER TABLE expenses ENABLE ROW LEVEL SECURITY;
 ALTER TABLE app_security ENABLE ROW LEVEL SECURITY;
 ALTER TABLE app_otps ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Allow all backend brand" ON brand_profile;
 CREATE POLICY "Allow all backend brand" ON brand_profile FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow all backend customers" ON customers;
 CREATE POLICY "Allow all backend customers" ON customers FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow all backend service_master" ON service_master;
 CREATE POLICY "Allow all backend service_master" ON service_master FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow all backend milling_bills" ON milling_bills;
 CREATE POLICY "Allow all backend milling_bills" ON milling_bills FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow all backend customer_ledger" ON customer_ledger;
 CREATE POLICY "Allow all backend customer_ledger" ON customer_ledger FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow all backend electricity" ON electricity_readings;
 CREATE POLICY "Allow all backend electricity" ON electricity_readings FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow all backend expenses" ON expenses;
 CREATE POLICY "Allow all backend expenses" ON expenses FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow all backend app_security" ON app_security;
 CREATE POLICY "Allow all backend app_security" ON app_security FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow all backend app_otps" ON app_otps;
 CREATE POLICY "Allow all backend app_otps" ON app_otps FOR ALL USING (true) WITH CHECK (true);
+
