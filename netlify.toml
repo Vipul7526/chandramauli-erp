@@ -1,0 +1,19 @@
+[build]
+  functions = "netlify/functions"
+  publish = "."
+
+[build.environment]
+  SECRETS_SCAN_ENABLED = "false"
+  SECRETS_SCAN_OMIT_KEYS = "ALLOWED_PACKAGE_NAME,GMAIL_USER"
+
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/api/:splat"
+  status = 200
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Access-Control-Allow-Origin = "*"
+    Access-Control-Allow-Headers = "Content-Type, Authorization, x-api-key"
+    Access-Control-Allow-Methods = "GET, POST, PUT, DELETE, OPTIONS"

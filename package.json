@@ -1,0 +1,25 @@
+{
+  "name": "chandramauli-erp-netlify-backend",
+  "version": "1.0.0",
+  "description": "Netlify Serverless Backend API for Chandramauli Oil ERP (Connected to Supabase)",
+  "main": "netlify/functions/api.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "build": "echo 'Build ready'"
+  },
+  "keywords": [
+    "chandramauli",
+    "oil-mill",
+    "erp",
+    "supabase",
+    "netlify"
+  ],
+  "author": "Chandramauli Oil Mill",
+  "license": "ISC",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.42.0",
+    "dotenv": "^16.4.5",
+    "nodemailer": "^10.1.7"
+  }
+}
