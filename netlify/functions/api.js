@@ -481,7 +481,7 @@ exports.handler = async (event, context) => {
       }
 
       if (method === 'POST') {
-        const { previous_reading, current_reading, reading_date, meter_number, notes } = body;
+        const { previous_reading, current_reading, reading_date, start_date, days_elapsed, billing_interval, meter_number, notes } = body;
 
         if (previous_reading === undefined || current_reading === undefined) {
           return jsonResponse(400, { error: 'previous_reading and current_reading are required' });
@@ -494,31 +494,66 @@ exports.handler = async (event, context) => {
           return jsonResponse(400, { error: 'Current reading cannot be lower than previous reading' });
         }
 
-        const unitsConsumed = curr - prev;
-        const fixedCost = 80.00;
-        const unitRate = 7.77;
-        const totalCost = Math.round((fixedCost + (unitsConsumed * unitRate)) * 100) / 100;
+        const days = Math.max(1, parseInt(days_elapsed || body.days || 1));
+        const interval = (billing_interval || (days === 7 ? 'WEEKLY' : days >= 28 ? 'MONTHLY' : 'DAILY')).toUpperCase();
 
-        const { data: newReading, error } = await supabase
+        const unitsConsumed = Math.round((curr - prev) * 100) / 100;
+        const fixedDailyRate = 80.00;
+        const unitRate = 7.77;
+        const fixedTotalCost = Math.round(days * fixedDailyRate * 100) / 100; // Automatically added for every date
+        const unitsCost = Math.round(unitsConsumed * unitRate * 100) / 100;
+        const totalCost = Math.round((fixedTotalCost + unitsCost) * 100) / 100;
+
+        const insertPayload = {
+          reading_date: reading_date || new Date().toISOString().slice(0, 10),
+          previous_reading: prev,
+          current_reading: curr,
+          meter_number: meter_number || 'MAIN-METER-1',
+          notes: notes || null,
+        };
+
+        if (start_date) insertPayload.start_date = start_date;
+        insertPayload.days_elapsed = days;
+        insertPayload.billing_interval = interval;
+        insertPayload.fixed_total_cost = fixedTotalCost;
+        insertPayload.final_total_cost = totalCost;
+
+        let newReading = null;
+        const { data: resData, error } = await supabase
           .from('electricity_readings')
-          .insert({
-            reading_date: reading_date || new Date().toISOString().slice(0, 10),
-            previous_reading: prev,
-            current_reading: curr,
-            meter_number: meter_number || 'MAIN-METER-1',
-            notes: notes || null,
-          })
+          .insert(insertPayload)
           .select()
           .single();
 
-        if (error) throw error;
+        if (error) {
+          // Fallback if custom columns are not yet applied in Supabase
+          const { data: fallbackData, error: fbErr } = await supabase
+            .from('electricity_readings')
+            .insert({
+              reading_date: reading_date || new Date().toISOString().slice(0, 10),
+              previous_reading: prev,
+              current_reading: curr,
+              meter_number: meter_number || 'MAIN-METER-1',
+              notes: notes || `[${interval}: ${days} days @ ₹80/day = ₹${fixedTotalCost} fixed]`,
+            })
+            .select()
+            .single();
+
+          if (fbErr) throw fbErr;
+          newReading = fallbackData;
+        } else {
+          newReading = resData;
+        }
 
         return jsonResponse(201, {
           message: 'Electricity reading recorded and added to expenses successfully',
           reading: newReading,
+          daysElapsed: days,
+          billingInterval: interval,
+          fixedTotalCost,
           unitsConsumed,
           totalCost,
-          formula: `₹80.00 fixed + (${unitsConsumed} units * ₹7.77) = ₹${totalCost}`,
+          formula: `${days} days × ₹80.00 fixed (₹${fixedTotalCost}) + (${unitsConsumed} units × ₹7.77) = ₹${totalCost}`,
         });
       }
     }
@@ -736,49 +771,90 @@ exports.handler = async (event, context) => {
     // 9. APP SECURITY & EMAIL OTP RECOVERY
     // -------------------------------------------------------------------------
     if (path === '/auth/status') {
-      const { data: sec } = await supabase.from('app_security').select('admin_email, is_configured').limit(1).maybeSingle();
+      const { data: sec } = await supabase.from('app_security').select('admin_email, is_configured, pin_code, pin_required, device_lock_enrolled').limit(1).maybeSingle();
       return jsonResponse(200, {
         configured: !!(sec && sec.is_configured),
         registeredEmail: sec ? sec.admin_email : null,
+        hasPin: !!(sec && sec.pin_code),
+        pinRequired: !!(sec && sec.pin_required),
+        deviceLockEnrolled: !!(sec && sec.device_lock_enrolled),
       });
     }
 
     if (path === '/auth/setup' && method === 'POST') {
-      const { admin_email, password, pin_code } = body;
-      if (!admin_email || !password) {
-        return jsonResponse(400, { error: 'admin_email and password are required' });
+      const { admin_email, password, pin_code, pin_required, device_lock_enrolled } = body;
+      if (!admin_email) {
+        return jsonResponse(400, { error: 'admin_email is required' });
       }
+
+      if (pin_code) {
+        const cleanPin = pin_code.toString().trim();
+        if (!/^\d{4,8}$/.test(cleanPin)) {
+          return jsonResponse(400, { error: 'In-app PIN must be between 4 and 8 digits (numbers only)' });
+        }
+      }
+
+      const upsertPayload = {
+        id: '00000000-0000-0000-0000-000000000001',
+        admin_email: admin_email.trim().toLowerCase(),
+        password_hash: (password || pin_code || '1234').trim(),
+        pin_code: pin_code ? pin_code.toString().trim() : null,
+        pin_required: !!pin_required,
+        device_lock_enrolled: !!device_lock_enrolled,
+        is_configured: true,
+        updated_at: new Date().toISOString(),
+      };
 
       const { data, error } = await supabase
         .from('app_security')
-        .upsert({
-          id: '00000000-0000-0000-0000-000000000001',
-          admin_email: admin_email.trim().toLowerCase(),
-          password_hash: password.trim(),
-          pin_code: pin_code ? pin_code.trim() : null,
-          is_configured: true,
-          updated_at: new Date().toISOString(),
-        })
+        .upsert(upsertPayload)
         .select()
         .single();
 
-      if (error) throw error;
+      if (error) {
+        // Fallback without new columns if not yet migrated
+        const { data: fbData, error: fbErr } = await supabase
+          .from('app_security')
+          .upsert({
+            id: '00000000-0000-0000-0000-000000000001',
+            admin_email: admin_email.trim().toLowerCase(),
+            password_hash: (password || pin_code || '1234').trim(),
+            pin_code: pin_code ? pin_code.toString().trim() : null,
+            is_configured: true,
+            updated_at: new Date().toISOString(),
+          })
+          .select()
+          .single();
 
-      return jsonResponse(200, { message: 'Security configured successfully', email: data.admin_email });
+        if (fbErr) throw fbErr;
+        return jsonResponse(200, {
+          message: 'Security credentials saved successfully',
+          email: fbData.admin_email,
+          hasPin: !!fbData.pin_code,
+        });
+      }
+
+      return jsonResponse(200, {
+        message: 'Security credentials saved successfully',
+        email: data.admin_email,
+        hasPin: !!data.pin_code,
+        pinRequired: data.pin_required,
+        deviceLockEnrolled: data.device_lock_enrolled,
+      });
     }
 
     if (path === '/auth/verify' && method === 'POST') {
-      const { password } = body;
-      if (!password) return jsonResponse(400, { error: 'Password is required' });
+      const input = (body.pin || body.password || '').toString().trim();
+      if (!input) return jsonResponse(400, { error: 'PIN or password is required' });
 
       const { data: sec } = await supabase.from('app_security').select('*').limit(1).maybeSingle();
       if (!sec) {
-        return jsonResponse(200, { verified: true, message: 'No password set yet' });
+        return jsonResponse(200, { verified: true, message: 'No security credentials set yet' });
       }
 
-      const isValid = (sec.password_hash === password.trim()) || (sec.pin_code && sec.pin_code === password.trim());
+      const isValid = (sec.password_hash === input) || (sec.pin_code && sec.pin_code.trim() === input);
       if (!isValid) {
-        return jsonResponse(401, { verified: false, error: 'Incorrect password or PIN' });
+        return jsonResponse(401, { verified: false, error: 'Incorrect PIN or password' });
       }
 
       return jsonResponse(200, { verified: true, message: 'Authentication successful' });
