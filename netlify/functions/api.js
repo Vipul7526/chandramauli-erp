@@ -34,6 +34,86 @@ function getHeader(headers, name) {
   return '';
 }
 
+async function recalculateCustomerBalance(supabase, customerId) {
+  try {
+    const { data: cust } = await supabase
+      .from('customers')
+      .select('initial_balance')
+      .eq('id', customerId)
+      .single();
+
+    const { data: txs } = await supabase
+      .from('customer_ledger')
+      .select('entry_type, amount')
+      .eq('customer_id', customerId);
+
+    const initBal = parseFloat(cust?.initial_balance || 0);
+    let totDebit = 0;
+    let totCredit = 0;
+
+    (txs || []).forEach(t => {
+      const a = parseFloat(t.amount || 0);
+      if (t.entry_type === 'DEBIT') totDebit += a;
+      if (t.entry_type === 'CREDIT') totCredit += a;
+    });
+
+    const netBal = Math.round((initBal + totDebit - totCredit) * 100) / 100;
+    const currentDue = netBal >= 0 ? netBal : 0;
+    const currentAdvance = netBal < 0 ? Math.abs(netBal) : 0;
+
+    await supabase
+      .from('customers')
+      .update({
+        current_due: currentDue,
+        current_advance: currentAdvance,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', customerId);
+
+    return { currentDue, currentAdvance };
+  } catch (err) {
+    console.error('[recalculateCustomerBalance error]', err);
+    return null;
+  }
+}
+
+async function allocatePaymentToUnpaidBills(supabase, customerId, paymentAmount) {
+  try {
+    let remainingPayment = parseFloat(paymentAmount || 0);
+    if (remainingPayment <= 0) return;
+
+    const { data: unpaidBills } = await supabase
+      .from('milling_bills')
+      .select('id, total_amount, amount_paid, balance_due')
+      .eq('customer_id', customerId)
+      .gt('balance_due', 0)
+      .order('order_datetime', { ascending: true });
+
+    if (!unpaidBills || unpaidBills.length === 0) return;
+
+    for (const b of unpaidBills) {
+      if (remainingPayment <= 0) break;
+      const due = parseFloat(b.balance_due || 0);
+      const payTowardsThis = Math.min(remainingPayment, due);
+      const newPaid = Math.round((parseFloat(b.amount_paid || 0) + payTowardsThis) * 100) / 100;
+      const newDue = Math.max(0, Math.round((due - payTowardsThis) * 100) / 100);
+
+      await supabase
+        .from('milling_bills')
+        .update({
+          amount_paid: newPaid,
+          balance_due: newDue,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', b.id);
+
+      remainingPayment -= payTowardsThis;
+    }
+  } catch (err) {
+    console.error('[allocatePaymentToUnpaidBills error]', err);
+  }
+}
+
 function normalizeHash(hash) {
   return (hash || '').replace(/[^a-fA-F0-9]/g, '').toUpperCase();
 }
@@ -143,16 +223,57 @@ exports.handler = async (event, context) => {
     }
 
     // -------------------------------------------------------------------------
-    // 2. UNIFIED CUSTOMERS (Strictly 1 Customer per 1 Mobile Number)
+    // 2. UNIFIED CUSTOMERS (Strictly 1 Customer per Mobile, Soft Delete 30 Days & Instant Permanent Delete)
     // -------------------------------------------------------------------------
-    if (path === '/customers') {
+    if (path === '/customers' || path === '/customers/update' || path === '/customers/restore') {
+      // Restore Customer from Recycle Bin
+      if ((path === '/customers/restore' && method === 'POST') || (path === '/customers' && method === 'POST' && body.action === 'RESTORE')) {
+        const targetId = body.id || query.id;
+        if (!targetId) return jsonResponse(400, { error: 'Customer id is required to restore' });
+
+        const { data: restored, error: restErr } = await supabase
+          .from('customers')
+          .update({
+            is_deleted: false,
+            deleted_at: null,
+            scheduled_deletion_at: null,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', targetId)
+          .select()
+          .single();
+
+        if (restErr) throw restErr;
+
+        return jsonResponse(200, {
+          message: 'Customer restored to active directory successfully',
+          customer: restored,
+        });
+      }
+
       if (method === 'GET') {
         const searchQuery = (query.search || '').trim();
+        const isTrash = query.trash === 'true';
+
+        // Auto-purge any customer scheduled for deletion whose 30-day window has expired
+        try {
+          await supabase
+            .from('customers')
+            .delete()
+            .eq('is_deleted', true)
+            .lte('scheduled_deletion_at', new Date().toISOString());
+        } catch (_) {}
 
         let req = supabase
           .from('customers')
-          .select('id, serial_number, serial_code, name, mobile, village_or_city, address, initial_balance, current_due, current_advance, status, created_at')
+          .select('id, serial_number, serial_code, name, mobile, village_or_city, address, initial_balance, current_due, current_advance, status, notes, created_at, is_deleted, deleted_at, scheduled_deletion_at')
           .order('serial_number', { ascending: false });
+
+        if (isTrash) {
+          req = req.eq('is_deleted', true);
+        } else {
+          req = req.or('is_deleted.is.null,is_deleted.eq.false');
+        }
 
         if (searchQuery) {
           req = req.or(`name.ilike.%${searchQuery}%,mobile.ilike.%${searchQuery}%,serial_code.ilike.%${searchQuery}%`);
@@ -161,13 +282,24 @@ exports.handler = async (event, context) => {
         const { data: customers, error } = await req;
         if (error) throw error;
 
+        // Fetch trash count for tab badge
+        let trashCount = 0;
+        try {
+          const { count } = await supabase
+            .from('customers')
+            .select('id', { count: 'exact', head: true })
+            .eq('is_deleted', true);
+          trashCount = count || 0;
+        } catch (_) {}
+
         return jsonResponse(200, {
           customers,
           total: customers.length,
+          trashCount,
         });
       }
 
-      if (method === 'POST') {
+      if (method === 'POST' && path === '/customers' && !body.action) {
         const { name, mobile, village_or_city, address, initial_due, initial_advance, notes } = body;
         if (!name || !name.trim()) {
           return jsonResponse(400, { error: 'Customer name is required' });
@@ -181,11 +313,11 @@ exports.handler = async (event, context) => {
         // Enforce 1 customer per 1 mobile number!
         const { data: existingCust } = await supabase
           .from('customers')
-          .select('id, name, serial_code, mobile')
+          .select('id, name, serial_code, mobile, is_deleted')
           .eq('mobile', cleanMobile)
           .maybeSingle();
 
-        if (existingCust) {
+        if (existingCust && !existingCust.is_deleted) {
           return jsonResponse(400, {
             error: 'Mobile number already registered',
             message: `Customer with mobile ${cleanMobile} is already registered as "${existingCust.name}" (${existingCust.serial_code}). Strictly 1 customer is allowed per mobile number.`,
@@ -208,6 +340,7 @@ exports.handler = async (event, context) => {
             current_due: initDue > 0 ? initDue : 0,
             current_advance: initAdv > 0 ? initAdv : 0,
             notes: notes || null,
+            is_deleted: false,
           })
           .select()
           .single();
@@ -220,6 +353,110 @@ exports.handler = async (event, context) => {
           serial_code: newCustomer.serial_code,
           serial_number: newCustomer.serial_number,
         });
+      }
+
+      // Rename & Update Customer
+      if (method === 'PUT' || method === 'PATCH' || (method === 'POST' && path === '/customers/update')) {
+        const { id, name, mobile, village_or_city, address, notes } = body;
+        const targetId = id || query.id;
+        if (!targetId) {
+          return jsonResponse(400, { error: 'Customer id is required for update' });
+        }
+
+        const updateData = { updated_at: new Date().toISOString() };
+        if (name && name.trim()) updateData.name = name.trim();
+        if (village_or_city !== undefined) updateData.village_or_city = village_or_city ? village_or_city.trim() : null;
+        if (address !== undefined) updateData.address = address ? address.trim() : null;
+        if (notes !== undefined) updateData.notes = notes ? notes.trim() : null;
+
+        if (mobile && mobile.trim()) {
+          const cleanMobile = mobile.trim();
+          const { data: duplicate } = await supabase
+            .from('customers')
+            .select('id, name, serial_code')
+            .eq('mobile', cleanMobile)
+            .neq('id', targetId)
+            .or('is_deleted.is.null,is_deleted.eq.false')
+            .maybeSingle();
+
+          if (duplicate) {
+            return jsonResponse(400, {
+              error: 'Mobile number already in use',
+              message: `Mobile number ${cleanMobile} is already in use by ${duplicate.name} (${duplicate.serial_code}).`,
+            });
+          }
+          updateData.mobile = cleanMobile;
+        }
+
+        const { data: updatedCustomer, error: updateErr } = await supabase
+          .from('customers')
+          .update(updateData)
+          .eq('id', targetId)
+          .select()
+          .single();
+
+        if (updateErr) throw updateErr;
+
+        // Synchronize customer name & mobile in past milling_bills
+        if (updateData.name || updateData.mobile) {
+          const billSync = {};
+          if (updateData.name) billSync.customer_name = updateData.name;
+          if (updateData.mobile) billSync.customer_mobile = updateData.mobile;
+          await supabase.from('milling_bills').update(billSync).eq('customer_id', targetId);
+        }
+
+        return jsonResponse(200, {
+          message: 'Customer data updated and renamed successfully',
+          customer: updatedCustomer,
+        });
+      }
+
+      // Delete Customer: Soft Delete (30 Days Auto-Delete) OR Instant Permanent Delete Now
+      if (method === 'DELETE' || (method === 'POST' && body.action === 'DELETE')) {
+        const targetId = query.id || body.id;
+        const isPermanent = query.permanent === 'true' || body.permanent === true;
+
+        if (!targetId) {
+          return jsonResponse(400, { error: 'Customer id is required for deletion' });
+        }
+
+        if (isPermanent) {
+          // Permanently and instantly delete from Supabase
+          await supabase.from('customer_ledger').delete().eq('customer_id', targetId);
+          await supabase.from('milling_bills').delete().eq('customer_id', targetId);
+          const { error: delErr } = await supabase.from('customers').delete().eq('id', targetId);
+          if (delErr) throw delErr;
+
+          return jsonResponse(200, {
+            message: 'Customer permanently deleted immediately from database.',
+            permanent: true,
+          });
+        } else {
+          // Soft delete into 30-Day Recycle Bin
+          const now = new Date();
+          const scheduledDeletion = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
+
+          const { data: softDeleted, error: softErr } = await supabase
+            .from('customers')
+            .update({
+              is_deleted: true,
+              deleted_at: now.toISOString(),
+              scheduled_deletion_at: scheduledDeletion,
+              updated_at: now.toISOString(),
+            })
+            .eq('id', targetId)
+            .select()
+            .single();
+
+          if (softErr) throw softErr;
+
+          return jsonResponse(200, {
+            message: 'Customer moved to Recycle Bin. Auto-deletes permanently in 30 days unless restored or deleted now.',
+            permanent: false,
+            customer: softDeleted,
+            scheduledDeletionAt: scheduledDeletion,
+          });
+        }
       }
     }
 
@@ -420,11 +657,114 @@ exports.handler = async (event, context) => {
 
         if (billErr) throw billErr;
 
+        // Failsafe: Ensure customer ledger reflects the new bill and payment
+        try {
+          const { data: existingLedger } = await supabase
+            .from('customer_ledger')
+            .select('id')
+            .eq('bill_id', newBill.id)
+            .limit(1);
+
+          if (!existingLedger || existingLedger.length === 0) {
+            const desc = isWheat
+              ? `Wheat Pisai #${newBill.bill_number} - ${newBill.wheat_kg}kg Gehu`
+              : `Milling Slip #${newBill.bill_number} - ${newBill.sarson_kg}kg ${newBill.oil_type}`;
+
+            await supabase.from('customer_ledger').insert({
+              customer_id: cust.id,
+              bill_id: newBill.id,
+              entry_type: 'DEBIT',
+              amount: totalAmount,
+              payment_mode: payment_mode,
+              description: desc,
+              transaction_date: billData.order_datetime,
+            });
+
+            if (paidNum > 0) {
+              await supabase.from('customer_ledger').insert({
+                customer_id: cust.id,
+                bill_id: newBill.id,
+                entry_type: 'CREDIT',
+                amount: paidNum,
+                payment_mode: payment_mode,
+                description: `Payment received for Order #${newBill.bill_number}`,
+                transaction_date: billData.order_datetime,
+              });
+            }
+          }
+
+          await recalculateCustomerBalance(supabase, cust.id);
+        } catch (lErr) {
+          console.error('[bill ledger sync error]', lErr);
+        }
+
         return jsonResponse(201, {
           message: 'Order created and posted to ledger successfully',
           bill: newBill,
         });
       }
+    }
+
+    // Record Payment Directly Against an Existing Bill
+    if (path === '/bills/payment' && method === 'POST') {
+      const { bill_id, payment_amount, payment_mode = 'CASH', notes } = body;
+      if (!bill_id || !payment_amount) {
+        return jsonResponse(400, { error: 'bill_id and payment_amount are required' });
+      }
+
+      const payAmt = parseFloat(payment_amount);
+      if (payAmt <= 0) {
+        return jsonResponse(400, { error: 'Payment amount must be greater than zero' });
+      }
+
+      const { data: bill, error: billErr } = await supabase
+        .from('milling_bills')
+        .select('*')
+        .eq('id', bill_id)
+        .single();
+
+      if (billErr || !bill) {
+        return jsonResponse(404, { error: 'Bill not found' });
+      }
+
+      const currentPaid = parseFloat(bill.amount_paid || 0);
+      const totalAmt = parseFloat(bill.total_amount || 0);
+      const newPaid = Math.round((currentPaid + payAmt) * 100) / 100;
+      const newDue = Math.max(0, Math.round((totalAmt - newPaid) * 100) / 100);
+
+      const { data: updatedBill, error: upErr } = await supabase
+        .from('milling_bills')
+        .update({
+          amount_paid: newPaid,
+          balance_due: newDue,
+          payment_mode: payment_mode,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', bill_id)
+        .select()
+        .single();
+
+      if (upErr) throw upErr;
+
+      // Add credit entry to customer ledger
+      await supabase.from('customer_ledger').insert({
+        customer_id: bill.customer_id,
+        bill_id: bill.id,
+        entry_type: 'CREDIT',
+        amount: payAmt,
+        payment_mode: payment_mode,
+        description: notes || `Payment of ₹${payAmt} received for Bill #${bill.bill_number}`,
+        transaction_date: new Date().toISOString(),
+      });
+
+      // Recalculate customer due/advance directly
+      const balance = await recalculateCustomerBalance(supabase, bill.customer_id);
+
+      return jsonResponse(200, {
+        message: 'Bill payment recorded successfully',
+        bill: updatedBill,
+        customerBalance: balance,
+      });
     }
 
     // Update Pickup Date & Status
@@ -620,9 +960,17 @@ exports.handler = async (event, context) => {
 
         if (insertErr) throw insertErr;
 
+        // Automatically allocate received payment to pending unpaid bills for this customer
+        if (entry_type === 'CREDIT') {
+          await allocatePaymentToUnpaidBills(supabase, targetCustId, amtNum);
+        }
+
+        // Explicitly recalculate customer balance directly in Supabase
+        const balance = await recalculateCustomerBalance(supabase, targetCustId);
+
         const { data: updatedCust } = await supabase
           .from('customers')
-          .select('current_due, current_advance')
+          .select('*')
           .eq('id', targetCustId)
           .single();
 
@@ -630,6 +978,8 @@ exports.handler = async (event, context) => {
           message: 'Ledger entry recorded',
           entry: newEntry,
           updatedCustomer: updatedCust,
+          currentDue: balance ? balance.currentDue : (updatedCust?.current_due || 0),
+          currentAdvance: balance ? balance.currentAdvance : (updatedCust?.current_advance || 0),
         });
       }
     }
