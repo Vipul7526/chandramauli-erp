@@ -1,6 +1,8 @@
 [build]
+  command = "npm install"
   functions = "netlify/functions"
   publish = "."
+
 
 [build.environment]
   SECRETS_SCAN_ENABLED = "false"
