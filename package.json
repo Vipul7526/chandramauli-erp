@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "build": "echo 'Build ready'"
+    "build": "echo 'Build ready'",
+    "test": "node test_trust_engine.js"
   },
   "keywords": [
     "chandramauli",

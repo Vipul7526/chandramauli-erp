@@ -198,3 +198,32 @@ BEGIN
         VALUES ('Wheat / Gehu Pisai (Atta Chakki)', 'SERV-03', 'WHEAT', 'Wheat Flour', 3.00, 96.00, 4.00, 'Flour grinding rate per kg for whole wheat');
     END IF;
 END $$;
+
+-- 11. Multi-Layer Cryptographic Trust Tables
+CREATE TABLE IF NOT EXISTS device_keys (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    device_id VARCHAR(100) NOT NULL UNIQUE,
+    public_key_pem TEXT NOT NULL,
+    algorithm VARCHAR(50) DEFAULT 'EC-P256',
+    is_active BOOLEAN DEFAULT TRUE,
+    enrolled_at TIMESTAMPTZ DEFAULT now(),
+    last_used_at TIMESTAMPTZ DEFAULT now(),
+    notes TEXT
+);
+
+CREATE TABLE IF NOT EXISTS request_nonces (
+    nonce VARCHAR(128) PRIMARY KEY,
+    device_id VARCHAR(100) NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_request_nonces_created ON request_nonces (created_at);
+
+ALTER TABLE device_keys ENABLE ROW LEVEL SECURITY;
+ALTER TABLE request_nonces ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Allow all backend device_keys" ON device_keys;
+CREATE POLICY "Allow all backend device_keys" ON device_keys FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow all backend request_nonces" ON request_nonces;
+CREATE POLICY "Allow all backend request_nonces" ON request_nonces FOR ALL USING (true) WITH CHECK (true);

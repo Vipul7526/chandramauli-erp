@@ -7,6 +7,15 @@
 
 const { getSupabaseClient } = require('./supabaseClient');
 const { sendOtpEmail } = require('./emailService');
+const {
+  DEFAULT_CONFIG,
+  getExpectedConfig,
+  verifyAppIdentity,
+  enrollDeviceKey,
+  generateHourlyToken,
+  verifySignedRequest,
+  checkRateLimit,
+} = require('./trustEngine');
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -143,48 +152,113 @@ exports.handler = async (event, context) => {
 
   const supabase = getSupabaseClient();
 
+  // Rate Limiting
+  const clientIp = getHeader(event.headers, 'x-forwarded-for') || event.headers['client-ip'] || 'unknown';
+  if (!checkRateLimit(clientIp)) {
+    return jsonResponse(429, { error: 'Too Many Requests', message: 'Rate limit exceeded. Please wait a moment.' });
+  }
+
   // Root health check & diagnostics
   if (path === '/' || path === '/health') {
+    const config = getExpectedConfig();
     return jsonResponse(200, {
       status: 'ok',
       service: 'Chandramauli Mustard Oil & Wheat ERP Backend',
       developer: 'Prince Singh',
       timestamp: new Date().toISOString(),
       databaseConnected: !!supabase,
-      shaVerificationEnabled: !!(process.env.APP_SHA1 || process.env.APP_SHA256),
+      shaVerificationEnabled: !!(config.certSha1 || config.certSha256),
+      trustEngine: {
+        package: config.allowedPkg,
+        signingCertSha256: config.certSha256,
+        signingCertSha1: config.certSha1,
+        hourlyTokenStepMinutes: 60,
+        layers: [
+          'LAYER_1_SIGNING_CERTIFICATE_FINGERPRINTS',
+          'LAYER_2_ANDROID_KEYSTORE_HARDWARE_KEYS',
+          'LAYER_3_HOURLY_ROTATING_HMAC_TOKENS',
+          'LAYER_4_CANONICAL_REQUEST_SIGNATURES_AND_NONCES',
+        ],
+      },
     });
   }
 
   // ---------------------------------------------------------------------------
   // TRUSTED APP SECURITY VERIFICATION (SHA-1 and SHA-256)
   // ---------------------------------------------------------------------------
-  const expectedSha1 = normalizeHash(process.env.APP_SHA1 || process.env.TRUSTED_APP_SHA1);
-  const expectedSha256 = normalizeHash(process.env.APP_SHA256 || process.env.TRUSTED_APP_SHA256);
-  const expectedPkg = (process.env.ALLOWED_PACKAGE_NAME || 'com.chandramauli.erp').trim();
+  const identityCheck = verifyAppIdentity(event.headers);
+  if (!identityCheck.valid) {
+    return jsonResponse(identityCheck.code, {
+      error: identityCheck.error,
+      message: identityCheck.message,
+    });
+  }
 
-  if (expectedSha1 || expectedSha256) {
-    const incomingSha1 = normalizeHash(getHeader(event.headers, 'x-app-signature-sha1'));
-    const incomingSha256 = normalizeHash(getHeader(event.headers, 'x-app-signature-sha256'));
-    const incomingPkg = getHeader(event.headers, 'x-app-package').trim();
-
-    if (expectedPkg && incomingPkg && incomingPkg !== expectedPkg) {
-      return jsonResponse(403, {
-        error: 'Forbidden: Untrusted Application Package',
-        message: `Package mismatch. Expected '${expectedPkg}', received '${incomingPkg}'.`,
+  // ---------------------------------------------------------------------------
+  // MULTI-LAYER CRYPTOGRAPHIC TRUST: ENROLLMENT & TOKEN ENDPOINTS
+  // ---------------------------------------------------------------------------
+  if (path === '/security/enroll-device' && method === 'POST') {
+    try {
+      const { deviceId, publicKey, algorithm = 'EC-P256', metadata } = body;
+      const result = await enrollDeviceKey(supabase, {
+        deviceId,
+        publicKeyBase64: publicKey,
+        algorithm,
+        metadata,
       });
-    }
-
-    if (expectedSha1 && incomingSha1 !== expectedSha1) {
-      return jsonResponse(403, {
-        error: 'Forbidden: Untrusted Application Signature (SHA-1 Mismatch)',
-        message: 'Access blocked: Android app SHA-1 fingerprint verification failed. Only official Chandramauli ERP APK can perform this operation.',
+      return jsonResponse(200, {
+        success: true,
+        message: 'Device hardware public key enrolled successfully',
+        ...result,
       });
+    } catch (err) {
+      return jsonResponse(400, { error: 'Device enrollment failed', message: err.message });
     }
+  }
 
-    if (expectedSha256 && incomingSha256 !== expectedSha256) {
-      return jsonResponse(403, {
-        error: 'Forbidden: Untrusted Application Signature (SHA-256 Mismatch)',
-        message: 'Access blocked: Android app SHA-256 fingerprint verification failed. Only official Chandramauli ERP APK can perform this operation.',
+  if (path === '/security/request-token' && method === 'GET') {
+    const devId = query.deviceId || getHeader(event.headers, 'x-device-id');
+    if (!devId) {
+      return jsonResponse(400, { error: 'deviceId is required to issue hourly rotating token' });
+    }
+    const tokenInfo = generateHourlyToken(devId);
+    return jsonResponse(200, {
+      success: true,
+      deviceId: devId,
+      ...tokenInfo,
+    });
+  }
+
+  if (path === '/security/trust-info' && method === 'GET') {
+    const config = getExpectedConfig();
+    return jsonResponse(200, {
+      applicationId: config.allowedPkg,
+      signingCertSha256: config.certSha256,
+      signingCertSha1: config.certSha1,
+      version: '1.0.0',
+      keystoreAlias: DEFAULT_CONFIG.keystoreAlias,
+      serverTime: new Date().toISOString(),
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // CRYPTOGRAPHIC REQUEST SIGNATURE & NONCE VERIFICATION (Sensitive Endpoints)
+  // ---------------------------------------------------------------------------
+  const isSensitiveMutation = ['POST', 'PUT', 'DELETE', 'PATCH'].includes(method) &&
+    !['/security/enroll-device', '/auth/verify', '/auth/status'].includes(path);
+
+  if (isSensitiveMutation && getHeader(event.headers, 'x-request-signature')) {
+    const sigCheck = await verifySignedRequest({
+      supabase,
+      method,
+      path,
+      body,
+      headers: event.headers,
+    });
+    if (!sigCheck.valid) {
+      return jsonResponse(sigCheck.code, {
+        error: sigCheck.error,
+        message: sigCheck.message,
       });
     }
   }

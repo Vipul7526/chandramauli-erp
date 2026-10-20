@@ -380,6 +380,28 @@ CREATE TABLE IF NOT EXISTS app_otps (
 CREATE INDEX IF NOT EXISTS idx_app_otps ON app_otps (email, otp_code, is_used);
 
 -- ----------------------------------------------------------------------------------
+-- 8B. MULTI-LAYER CRYPTOGRAPHIC TRUST: HARDWARE DEVICE KEYS & SINGLE-USE NONCES
+-- ----------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS device_keys (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    device_id VARCHAR(100) NOT NULL UNIQUE,
+    public_key_pem TEXT NOT NULL,
+    algorithm VARCHAR(50) DEFAULT 'EC-P256',
+    is_active BOOLEAN DEFAULT TRUE,
+    enrolled_at TIMESTAMPTZ DEFAULT now(),
+    last_used_at TIMESTAMPTZ DEFAULT now(),
+    notes TEXT
+);
+
+CREATE TABLE IF NOT EXISTS request_nonces (
+    nonce VARCHAR(128) PRIMARY KEY,
+    device_id VARCHAR(100) NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_request_nonces_created ON request_nonces (created_at);
+
+-- ----------------------------------------------------------------------------------
 -- 9. AUTOMATED LEDGER & BALANCE TRIGGERS
 -- ----------------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION recalc_customer_balance(cust_id UUID)
@@ -543,4 +565,13 @@ CREATE POLICY "Allow all backend app_security" ON app_security FOR ALL USING (tr
 
 DROP POLICY IF EXISTS "Allow all backend app_otps" ON app_otps;
 CREATE POLICY "Allow all backend app_otps" ON app_otps FOR ALL USING (true) WITH CHECK (true);
+
+ALTER TABLE device_keys ENABLE ROW LEVEL SECURITY;
+ALTER TABLE request_nonces ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Allow all backend device_keys" ON device_keys;
+CREATE POLICY "Allow all backend device_keys" ON device_keys FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow all backend request_nonces" ON request_nonces;
+CREATE POLICY "Allow all backend request_nonces" ON request_nonces FOR ALL USING (true) WITH CHECK (true);
 
