@@ -494,6 +494,16 @@ AFTER INSERT OR UPDATE OR DELETE ON customer_ledger
 FOR EACH ROW
 EXECUTE FUNCTION handle_ledger_change();
 
+-- Auto-Purge function for customers in Recycle Bin over 30 days
+CREATE OR REPLACE FUNCTION purge_expired_trash_customers()
+RETURNS void AS $$
+BEGIN
+    DELETE FROM customers
+    WHERE is_deleted = TRUE
+      AND scheduled_deletion_at <= now();
+END;
+$$ LANGUAGE plpgsql;
+
 -- ----------------------------------------------------------------------------------
 -- 10. ROW LEVEL SECURITY (RLS) POLICIES
 -- ----------------------------------------------------------------------------------
