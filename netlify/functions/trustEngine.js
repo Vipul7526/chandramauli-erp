@@ -29,14 +29,47 @@ function normalizeHex(str) {
 
 function getExpectedConfig() {
   const allowedPkg = (process.env.ALLOWED_PACKAGE_NAME || DEFAULT_CONFIG.applicationId).trim();
-  const certSha256 = normalizeHex(process.env.APP_SIGNING_SHA256 || process.env.APP_SHA256 || DEFAULT_CONFIG.signingCertSha256);
-  const certSha1 = normalizeHex(process.env.APP_SIGNING_SHA1 || process.env.APP_SHA1 || DEFAULT_CONFIG.signingCertSha1);
+  
+  const trustedSha256Set = new Set();
+  trustedSha256Set.add(normalizeHex(DEFAULT_CONFIG.signingCertSha256));
+  if (process.env.APP_SIGNING_SHA256) {
+    process.env.APP_SIGNING_SHA256.split(',').forEach(h => {
+      const clean = normalizeHex(h.trim());
+      if (clean) trustedSha256Set.add(clean);
+    });
+  }
+  if (process.env.APP_SHA256) {
+    process.env.APP_SHA256.split(',').forEach(h => {
+      const clean = normalizeHex(h.trim());
+      if (clean) trustedSha256Set.add(clean);
+    });
+  }
+
+  const trustedSha1Set = new Set();
+  trustedSha1Set.add(normalizeHex(DEFAULT_CONFIG.signingCertSha1));
+  if (process.env.APP_SIGNING_SHA1) {
+    process.env.APP_SIGNING_SHA1.split(',').forEach(h => {
+      const clean = normalizeHex(h.trim());
+      if (clean) trustedSha1Set.add(clean);
+    });
+  }
+  if (process.env.APP_SHA1) {
+    process.env.APP_SHA1.split(',').forEach(h => {
+      const clean = normalizeHex(h.trim());
+      if (clean) trustedSha1Set.add(clean);
+    });
+  }
+
+  const certSha256 = normalizeHex(DEFAULT_CONFIG.signingCertSha256);
+  const certSha1 = normalizeHex(DEFAULT_CONFIG.signingCertSha1);
   const rotationSecret = process.env.HOURLY_ROTATION_SECRET || 'CHANDRAMAULI_ERP_ROOT_SECRET_2026_MIRZAPUR';
 
   return {
     allowedPkg,
     certSha256,
     certSha1,
+    trustedSha256Set,
+    trustedSha1Set,
     rotationSecret,
   };
 }
@@ -92,8 +125,8 @@ function verifyAppIdentity(headers) {
   }
 
   // Primary Trust Mechanism: SHA-256 Certificate Fingerprint
-  if (config.certSha256) {
-    if (incomingSha256 && incomingSha256 !== config.certSha256) {
+  if (incomingSha256) {
+    if (!config.trustedSha256Set.has(incomingSha256)) {
       return {
         valid: false,
         code: 403,
@@ -104,8 +137,8 @@ function verifyAppIdentity(headers) {
   }
 
   // Legacy Compatibility Mechanism: SHA-1
-  if (config.certSha1 && !incomingSha256) {
-    if (incomingSha1 && incomingSha1 !== config.certSha1) {
+  if (!incomingSha256 && incomingSha1) {
+    if (!config.trustedSha1Set.has(incomingSha1)) {
       return {
         valid: false,
         code: 403,
@@ -127,6 +160,8 @@ function derToPem(base64Der) {
   return `-----BEGIN PUBLIC KEY-----\n${lines.join('\n')}\n-----END PUBLIC KEY-----\n`;
 }
 
+const enrolledKeysCache = new Map();
+
 async function enrollDeviceKey(supabase, { deviceId, publicKeyBase64, algorithm = 'EC-P256', metadata = {} }) {
   if (!deviceId || !publicKeyBase64) {
     throw new Error('deviceId and publicKeyBase64 are required for enrollment');
@@ -141,33 +176,40 @@ async function enrollDeviceKey(supabase, { deviceId, publicKeyBase64, algorithm 
     throw new Error(`Invalid cryptographic public key: ${e.message}`);
   }
 
-  if (supabase) {
-    const { data: existing } = await supabase
-      .from('device_keys')
-      .select('*')
-      .eq('device_id', deviceId)
-      .maybeSingle();
+  // Cache in-memory immediately
+  enrolledKeysCache.set(deviceId, pem);
 
-    if (existing) {
-      await supabase
+  if (supabase) {
+    try {
+      const { data: existing } = await supabase
         .from('device_keys')
-        .update({
+        .select('*')
+        .eq('device_id', deviceId)
+        .maybeSingle();
+
+      if (existing) {
+        await supabase
+          .from('device_keys')
+          .update({
+            public_key_pem: pem,
+            algorithm,
+            last_used_at: new Date().toISOString(),
+            is_active: true,
+          })
+          .eq('device_id', deviceId);
+      } else {
+        await supabase.from('device_keys').insert({
+          device_id: deviceId,
           public_key_pem: pem,
           algorithm,
-          last_used_at: new Date().toISOString(),
           is_active: true,
-        })
-        .eq('device_id', deviceId);
-    } else {
-      await supabase.from('device_keys').insert({
-        device_id: deviceId,
-        public_key_pem: pem,
-        algorithm,
-        is_active: true,
-        enrolled_at: new Date().toISOString(),
-        last_used_at: new Date().toISOString(),
-        notes: JSON.stringify(metadata),
-      });
+          enrolled_at: new Date().toISOString(),
+          last_used_at: new Date().toISOString(),
+          notes: JSON.stringify(metadata),
+        });
+      }
+    } catch (e) {
+      // In-memory key remains valid if database write encounters temporary issue
     }
   }
 
@@ -180,7 +222,11 @@ async function enrollDeviceKey(supabase, { deviceId, publicKeyBase64, algorithm 
 }
 
 async function getDevicePublicKey(supabase, deviceId) {
-  if (!supabase || !deviceId) return null;
+  if (!deviceId) return null;
+  if (enrolledKeysCache.has(deviceId)) {
+    return enrolledKeysCache.get(deviceId);
+  }
+  if (!supabase) return null;
   try {
     const { data } = await supabase
       .from('device_keys')
@@ -188,7 +234,8 @@ async function getDevicePublicKey(supabase, deviceId) {
       .eq('device_id', deviceId)
       .single();
 
-    if (data && data.is_active) {
+    if (data && data.is_active && data.public_key_pem) {
+      enrolledKeysCache.set(deviceId, data.public_key_pem);
       return data.public_key_pem;
     }
   } catch (_) {}
@@ -245,8 +292,8 @@ function verifyHourlyToken(deviceId, token) {
 // Canonical representation: METHOD\nPATH\nBODY_SHA256\nTIMESTAMP\nNONCE\nDEVICE_ID
 function buildCanonicalString(method, path, body, timestamp, nonce, deviceId) {
   const cleanMethod = (method || 'GET').toUpperCase();
-  const cleanPath = path.startsWith('/') ? path : `/${path}`;
-  const bodyText = typeof body === 'string' ? body : JSON.stringify(body || {});
+  const cleanPath = (path || '/').split('?')[0].replace(/\/+$/, '') || '/';
+  const bodyText = typeof body === 'string' ? body : (body ? JSON.stringify(body) : '');
   const bodyHash = crypto.createHash('sha256').update(bodyText || '').digest('hex');
 
   return `${cleanMethod}\n${cleanPath}\n${bodyHash}\n${timestamp}\n${nonce}\n${deviceId}`;

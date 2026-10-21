@@ -245,14 +245,16 @@ exports.handler = async (event, context) => {
   // CRYPTOGRAPHIC REQUEST SIGNATURE & NONCE VERIFICATION (Sensitive Endpoints)
   // ---------------------------------------------------------------------------
   const isSensitiveMutation = ['POST', 'PUT', 'DELETE', 'PATCH'].includes(method) &&
-    !['/security/enroll-device', '/auth/verify', '/auth/status'].includes(path);
+    !path.startsWith('/auth/') &&
+    !path.startsWith('/security/');
 
   if (isSensitiveMutation && getHeader(event.headers, 'x-request-signature')) {
+    const rawBody = event.body || '';
     const sigCheck = await verifySignedRequest({
       supabase,
       method,
       path,
-      body,
+      body: rawBody,
       headers: event.headers,
     });
     if (!sigCheck.valid) {
@@ -1274,7 +1276,7 @@ exports.handler = async (event, context) => {
 
       const { data: sec } = await supabase.from('app_security').select('*').limit(1).maybeSingle();
       if (!sec) {
-        return jsonResponse(200, { verified: true, message: 'No security credentials set yet' });
+        return jsonResponse(404, { verified: false, error: 'No security credentials configured yet. Please complete setup.' });
       }
 
       if (!sec.pin_code && (sec.password_hash === 'DEVICE_LOCK_MODE' || sec.password_hash === 'DEVICE_LOCK_ONLY')) {
