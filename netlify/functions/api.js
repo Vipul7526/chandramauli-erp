@@ -170,8 +170,7 @@ exports.handler = async (event, context) => {
       shaVerificationEnabled: !!(config.certSha1 || config.certSha256),
       trustEngine: {
         package: config.allowedPkg,
-        signingCertSha256: config.certSha256,
-        signingCertSha1: config.certSha1,
+        shaVerificationActive: !!(config.certSha1 || config.certSha256),
         hourlyTokenStepMinutes: 60,
         layers: [
           'LAYER_1_SIGNING_CERTIFICATE_FINGERPRINTS',
@@ -233,10 +232,8 @@ exports.handler = async (event, context) => {
     const config = getExpectedConfig();
     return jsonResponse(200, {
       applicationId: config.allowedPkg,
-      signingCertSha256: config.certSha256,
-      signingCertSha1: config.certSha1,
+      shaProtectionActive: true,
       version: '1.0.0',
-      keystoreAlias: DEFAULT_CONFIG.keystoreAlias,
       serverTime: new Date().toISOString(),
     });
   }
