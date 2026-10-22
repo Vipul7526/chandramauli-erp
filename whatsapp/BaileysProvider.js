@@ -1,7 +1,7 @@
 // ==================================================================================
 // CHANDRAMAULI ERP - BAILEYS WHATSAPP PROVIDER IMPLEMENTATION
-// Persistent Multi-Device WhatsApp Web protocol with 5-minute QR expiry,
-// Phone Number Pairing-Code support, and automatic reconnection.
+// Persistent Multi-Device WhatsApp Web protocol with dynamic QR rotation,
+// 5-minute total linking countdown window, auto-reconnection, and pairing codes.
 // Developer: Prince Singh
 // ==================================================================================
 
@@ -19,9 +19,10 @@ const {
   DisconnectReason,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
+  Browsers,
 } = require('@whiskeysockets/baileys');
 
-const QR_EXPIRY_MS = 300000; // 5 minutes = 300,000 milliseconds
+const TOTAL_LINKING_WINDOW_MS = 300000; // 5 minutes = 300,000 milliseconds
 
 class BaileysProvider extends IWhatsAppProvider {
   constructor(options = {}) {
@@ -33,65 +34,72 @@ class BaileysProvider extends IWhatsAppProvider {
     this.authState = null;
     this.saveCreds = null;
 
-    // State
-    this.status = 'NOT_LINKED'; // 'NOT_LINKED', 'INITIALIZING', 'QR_READY', 'PAIRING_READY', 'WAITING_FOR_SCAN', 'CONNECTED', 'RECONNECTING', 'SESSION_EXPIRED', 'QR_EXPIRED', 'FAILED'
+    // Connection state
+    this.status = 'NOT_LINKED'; // NOT_LINKED, INITIALIZING, QR_READY, PAIRING_READY, CONNECTED, DISCONNECTED, RECONNECTING, QR_EXPIRED
     this.isConnected = false;
     this.connectedPhone = null;
     this.connectedAt = null;
     this.lastDisconnectReason = null;
     this.lastError = null;
 
-    // Active linking attempt (5-minute expiry)
+    // Active linking session (5-minute total window with dynamic QR rotation)
     this.currentQrRaw = null;
     this.currentQrDataUrl = null;
     this.currentPairingCode = null;
-    this.qrExpiresAt = null;
-    this.qrTimer = null;
+    this.linkingDeadline = null;
+    this.sessionTimer = null;
+    this.linkingOptions = {};
 
     // Reconnection parameters
     this.reconnectAttempts = 0;
-    this.maxReconnectAttempts = 5;
+    this.maxReconnectAttempts = 10;
     this.isReconnecting = false;
     this.isExplicitDisconnect = false;
   }
 
-  // Helper to emit events to WhatsAppService
+  get qrExpiresAt() {
+    return this.linkingDeadline;
+  }
+
+  set qrExpiresAt(val) {
+    this.linkingDeadline = val;
+  }
+
   _notifyState() {
-    const statusData = this.getStatus();
-    this.events.emit('status', statusData);
+    this.events.emit('state_changed', this.getStatus());
   }
 
-  _cleanPhone(phone) {
-    if (!phone) return '';
-    let digits = phone.toString().replace(/[^0-9]/g, '');
-    if (digits.length === 10) {
-      digits = '91' + digits; // Default India Country Code (91)
-    }
-    return digits;
-  }
-
-  _clearExpiryTimer() {
-    if (this.qrTimer) {
-      clearTimeout(this.qrTimer);
-      this.qrTimer = null;
+  _clearSessionTimer() {
+    if (this.sessionTimer) {
+      clearTimeout(this.sessionTimer);
+      this.sessionTimer = null;
     }
   }
 
-  _startExpiryTimer() {
-    this._clearExpiryTimer();
-    this.qrExpiresAt = Date.now() + QR_EXPIRY_MS;
+  _startMasterSessionTimer() {
+    this._clearSessionTimer();
+    this.linkingDeadline = Date.now() + TOTAL_LINKING_WINDOW_MS;
 
-    this.qrTimer = setTimeout(() => {
-      if (!this.isConnected && (this.status === 'QR_READY' || this.status === 'PAIRING_READY' || this.status === 'WAITING_FOR_SCAN')) {
-        console.log('[WhatsApp Provider] QR / Linking attempt has expired after 5 minutes.');
+    this.sessionTimer = setTimeout(() => {
+      if (!this.isConnected && (this.status === 'QR_READY' || this.status === 'PAIRING_READY' || this.status === 'INITIALIZING' || this.status === 'RECONNECTING')) {
+        console.log('[WhatsApp Provider] 5 minutes session deadline reached without connection.');
         this.status = 'QR_EXPIRED';
         this.currentQrRaw = null;
         this.currentQrDataUrl = null;
         this.currentPairingCode = null;
-        this.lastError = 'QR expired. Generate a new QR to link WhatsApp again.';
+        this.linkingDeadline = null;
+        this.lastError = '5 मिनट बीत गए और लिंक नहीं हुआ। फिर से लिंक करने के लिए नया QR कोड बनाएँ।';
+
+        if (this.sock) {
+          try {
+            this.sock.end(undefined);
+          } catch (_) {}
+          this.sock = null;
+        }
+
         this._notifyState();
       }
-    }, QR_EXPIRY_MS);
+    }, TOTAL_LINKING_WINDOW_MS);
   }
 
   async init() {
@@ -125,22 +133,26 @@ class BaileysProvider extends IWhatsAppProvider {
   async _startSocket(options = {}) {
     try {
       this.isExplicitDisconnect = false;
+      this.linkingOptions = options;
       this.status = this.isConnected ? 'CONNECTED' : (this.authState?.creds?.registered ? 'RECONNECTING' : 'INITIALIZING');
       this._notifyState();
 
       const logger = pino({ level: 'silent' });
       const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1015901307] }));
 
+      // Use standard Ubuntu Chrome browser string to avoid WhatsApp anti-bot handshake failure
+      const browserConfig = Browsers ? Browsers.ubuntu('Chrome') : ['Chandramauli ERP', 'Chrome', '1.0.0'];
+
       this.sock = makeWASocket({
         version,
         logger,
-        printQRInTerminal: false, // We render QR in Android App, not terminal!
+        printQRInTerminal: false,
         auth: {
           creds: this.authState.creds,
           keys: makeCacheableSignalKeyStore(this.authState.keys, logger),
         },
         generateHighQualityLinkPreview: false,
-        browser: ['Chandramauli ERP', 'Chrome', '1.0.0'],
+        browser: browserConfig,
         syncFullHistory: false,
         connectTimeoutMs: 60000,
         keepAliveIntervalMs: 25000,
@@ -154,12 +166,12 @@ class BaileysProvider extends IWhatsAppProvider {
         const cleanPhone = this._cleanPhone(options.phoneNumber);
         if (cleanPhone.length >= 10) {
           setTimeout(async () => {
+            if (!this.sock || this.isConnected) return;
             try {
               const code = await this.sock.requestPairingCode(cleanPhone);
-              // Format code as XXXX-XXXX for user-friendly reading
               this.currentPairingCode = code ? (code.length === 8 ? `${code.slice(0, 4)}-${code.slice(4)}` : code) : null;
               this.status = 'PAIRING_READY';
-              this._startExpiryTimer();
+              this.lastError = null;
               this._notifyState();
               console.log(`[WhatsApp Provider] Pairing code generated: ${this.currentPairingCode} for ${cleanPhone}`);
             } catch (err) {
@@ -175,8 +187,18 @@ class BaileysProvider extends IWhatsAppProvider {
       this.sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
-        // 1. QR Code Received from WhatsApp Server
+        // 1. QR Code Received or Rotated from WhatsApp Server
         if (qr && !options.usePairingCode) {
+          // If the 5 minutes overall deadline has expired, don't show new QR
+          if (this.linkingDeadline && Date.now() >= this.linkingDeadline) {
+            this.status = 'QR_EXPIRED';
+            this.currentQrRaw = null;
+            this.currentQrDataUrl = null;
+            this.lastError = '5 मिनट बीत गए और लिंक नहीं हुआ। फिर से लिंक करने के लिए नया QR कोड बनाएँ।';
+            this._notifyState();
+            return;
+          }
+
           this.currentQrRaw = qr;
           try {
             this.currentQrDataUrl = await QRCode.toDataURL(qr, {
@@ -187,13 +209,14 @@ class BaileysProvider extends IWhatsAppProvider {
           } catch (e) {
             console.error('[QRCode Error]', e);
           }
+
           this.status = 'QR_READY';
-          this._startExpiryTimer();
+          this.lastError = null;
           this._notifyState();
-          console.log('[WhatsApp Provider] New QR Code generated (expires in 5 minutes).');
+          console.log('[WhatsApp Provider] Fresh/rotated QR Code received from WhatsApp. Immediately updated in app.');
         }
 
-        // 2. Connection Open (Authenticated Successfully)
+        // 2. Connection Open (Authenticated Successfully!)
         if (connection === 'open') {
           this.isConnected = true;
           this.status = 'CONNECTED';
@@ -203,7 +226,8 @@ class BaileysProvider extends IWhatsAppProvider {
           this.lastDisconnectReason = null;
           this.lastError = null;
 
-          this._clearExpiryTimer();
+          this._clearSessionTimer();
+          this.linkingDeadline = null;
           this.currentQrRaw = null;
           this.currentQrDataUrl = null;
           this.currentPairingCode = null;
@@ -219,32 +243,56 @@ class BaileysProvider extends IWhatsAppProvider {
         // 3. Connection Closed
         if (connection === 'close') {
           this.isConnected = false;
-          this._clearExpiryTimer();
 
           const statusCode = lastDisconnect?.error?.output?.statusCode;
           const reason = lastDisconnect?.error?.message || 'Unknown network error';
           this.lastDisconnectReason = `Code ${statusCode}: ${reason}`;
 
-          console.warn(`[WhatsApp Provider] ⚠️ Connection closed: ${this.lastDisconnectReason}`);
+          console.warn(`[WhatsApp Provider] Connection closed: ${this.lastDisconnectReason}`);
 
-          const shouldReconnect = !this.isExplicitDisconnect && statusCode !== DisconnectReason.loggedOut;
+          if (this.isExplicitDisconnect) {
+            this.status = 'NOT_LINKED';
+            this._notifyState();
+            return;
+          }
 
-          if (statusCode === DisconnectReason.loggedOut) {
-            console.log('[WhatsApp Provider] User logged out of WhatsApp Web. Clearing credentials...');
+          // Case A: User was previously registered/logged-in and logged out from device
+          if (this.authState?.creds?.registered && statusCode === DisconnectReason.loggedOut) {
+            console.log('[WhatsApp Provider] User logged out from WhatsApp device.');
             this.status = 'SESSION_EXPIRED';
             this.connectedPhone = null;
             this.connectedAt = null;
-            this.lastError = 'WhatsApp session expired or logged out from device. Please link again.';
+            this.lastError = 'WhatsApp session was logged out from device. Please link again.';
             await this._clearAuthFolder();
             this._notifyState();
-          } else if (shouldReconnect) {
+            return;
+          }
+
+          // Case B: Linking in progress and within the 5-minute session window!
+          // WhatsApp closes connection during QR rotation / handshake refresh; keep reconnecting to get the fresh QR!
+          if (this.linkingDeadline && Date.now() < this.linkingDeadline && !this.isConnected) {
+            console.log('[WhatsApp Provider] QR handshake cycled during linking. Fetching next rotated QR...');
+            this._scheduleLinkingReconnect(options);
+            return;
+          }
+
+          // Case C: Normal reconnect for an authenticated session
+          if (this.authState?.creds?.registered) {
             this.status = 'RECONNECTING';
             this._notifyState();
             this._scheduleReconnect();
-          } else {
-            this.status = 'DISCONNECTED';
-            this._notifyState();
+            return;
           }
+
+          // Case D: 5 minutes expired or session ended
+          this._clearSessionTimer();
+          this.linkingDeadline = null;
+          this.status = 'QR_EXPIRED';
+          this.currentQrRaw = null;
+          this.currentQrDataUrl = null;
+          this.currentPairingCode = null;
+          this.lastError = '5 मिनट बीत गए और लिंक नहीं हुआ। फिर से लिंक करने के लिए नया QR कोड बनाएँ।';
+          this._notifyState();
         }
       });
 
@@ -258,12 +306,32 @@ class BaileysProvider extends IWhatsAppProvider {
     }
   }
 
+  _scheduleLinkingReconnect(options = {}) {
+    if (this.isReconnecting) return;
+    this.isReconnecting = true;
+
+    setTimeout(async () => {
+      this.isReconnecting = false;
+      if (this.linkingDeadline && Date.now() < this.linkingDeadline && !this.isConnected) {
+        try {
+          if (this.sock) {
+            this.sock.end(undefined);
+            this.sock = null;
+          }
+          await this._startSocket(options);
+        } catch (e) {
+          console.error('[WhatsApp Provider] Linking reconnect error:', e.message);
+        }
+      }
+    }, 1500);
+  }
+
   _scheduleReconnect() {
     if (this.isReconnecting || this.isExplicitDisconnect) return;
     this.isReconnecting = true;
     this.reconnectAttempts++;
 
-    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000); // Exponential backoff (2s, 4s, 8s, max 30s)
+    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
     console.log(`[WhatsApp Provider] Scheduling reconnect attempt ${this.reconnectAttempts} in ${delay / 1000}s...`);
 
     setTimeout(async () => {
@@ -273,14 +341,14 @@ class BaileysProvider extends IWhatsAppProvider {
       } else {
         console.warn('[WhatsApp Provider] Max reconnect attempts reached.');
         this.status = 'FAILED';
-        this.lastError = 'Unable to reconnect to WhatsApp network after multiple attempts. Please link again.';
+        this.lastError = 'Unable to re-establish connection after multiple attempts.';
         this._notifyState();
       }
     }, delay);
   }
 
   async startLinking(options = {}) {
-    this._clearExpiryTimer();
+    this._clearSessionTimer();
     this.reconnectAttempts = 0;
     this.currentQrRaw = null;
     this.currentQrDataUrl = null;
@@ -294,21 +362,29 @@ class BaileysProvider extends IWhatsAppProvider {
       this.sock = null;
     }
 
-    // Refresh auth state
+    // If starting a fresh linking attempt, ensure clean unauthenticated session
+    if (!this.isConnected) {
+      await this._clearAuthFolder();
+    }
+
     const { state, saveCreds } = await useMultiFileAuthState(this.sessionDir);
     this.authState = state;
     this.saveCreds = saveCreds;
+
+    // Start 5-minute total linking window
+    this._startMasterSessionTimer();
 
     return await this._startSocket(options);
   }
 
   async refreshLinking() {
-    return await this.startLinking();
+    return await this.startLinking(this.linkingOptions);
   }
 
   async disconnect() {
     this.isExplicitDisconnect = true;
-    this._clearExpiryTimer();
+    this._clearSessionTimer();
+    this.linkingDeadline = null;
 
     if (this.sock) {
       try {
@@ -329,7 +405,6 @@ class BaileysProvider extends IWhatsAppProvider {
     this.currentQrRaw = null;
     this.currentQrDataUrl = null;
     this.currentPairingCode = null;
-    this.qrExpiresAt = null;
 
     console.log('[WhatsApp Provider] WhatsApp disconnected and session wiped cleanly.');
     this._notifyState();
@@ -341,7 +416,9 @@ class BaileysProvider extends IWhatsAppProvider {
       if (fs.existsSync(this.sessionDir)) {
         const files = fs.readdirSync(this.sessionDir);
         for (const file of files) {
-          fs.unlinkSync(path.join(this.sessionDir, file));
+          try {
+            fs.unlinkSync(path.join(this.sessionDir, file));
+          } catch (_) {}
         }
       }
     } catch (e) {
@@ -353,15 +430,15 @@ class BaileysProvider extends IWhatsAppProvider {
     const now = Date.now();
     let remainingSeconds = 0;
 
-    if (this.qrExpiresAt && this.qrExpiresAt > now) {
-      remainingSeconds = Math.max(0, Math.floor((this.qrExpiresAt - now) / 1000));
-    } else if (this.qrExpiresAt && this.qrExpiresAt <= now && !this.isConnected) {
-      if (this.status === 'QR_READY' || this.status === 'PAIRING_READY' || this.status === 'WAITING_FOR_SCAN') {
+    if (this.linkingDeadline && this.linkingDeadline > now) {
+      remainingSeconds = Math.max(0, Math.floor((this.linkingDeadline - now) / 1000));
+    } else if (this.linkingDeadline && this.linkingDeadline <= now && !this.isConnected) {
+      if (this.status === 'QR_READY' || this.status === 'PAIRING_READY' || this.status === 'INITIALIZING') {
         this.status = 'QR_EXPIRED';
         this.currentQrRaw = null;
         this.currentQrDataUrl = null;
         this.currentPairingCode = null;
-        this.lastError = 'QR expired. Generate a new QR to link WhatsApp again.';
+        this.lastError = '5 मिनट बीत गए और लिंक नहीं हुआ। फिर से लिंक करने के लिए नया QR कोड बनाएँ।';
       }
     }
 
@@ -376,10 +453,21 @@ class BaileysProvider extends IWhatsAppProvider {
       qrDataUrl: this.status === 'QR_READY' ? this.currentQrDataUrl : null,
       qrRaw: this.status === 'QR_READY' ? this.currentQrRaw : null,
       pairingCode: this.status === 'PAIRING_READY' ? this.currentPairingCode : null,
-      expiresAt: this.qrExpiresAt,
+      expiresAt: this.linkingDeadline,
       expiresInSeconds: remainingSeconds,
       timestamp: new Date().toISOString(),
     };
+  }
+
+  _cleanPhone(phone) {
+    if (!phone) return '';
+    let digits = phone.toString().replace(/[^0-9]/g, '');
+    if (digits.startsWith('0')) digits = digits.substring(1);
+    // If 10 digits (standard Indian mobile number without country code), prepend 91
+    if (digits.length === 10) {
+      digits = '91' + digits;
+    }
+    return digits;
   }
 
   async sendMessage(phoneNumber, messageText) {
@@ -395,7 +483,6 @@ class BaileysProvider extends IWhatsAppProvider {
     const jid = `${cleanPhone}@s.whatsapp.net`;
 
     try {
-      // Send message using Baileys socket
       const sent = await this.sock.sendMessage(jid, { text: messageText });
       const messageId = sent?.key?.id || `msg-${Date.now()}`;
 
