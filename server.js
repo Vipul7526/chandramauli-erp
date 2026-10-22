@@ -132,6 +132,13 @@ const server = http.createServer(async (req, res) => {
   }
 
   // 3. STATIC FILES & FLUTTER WEB APP
+  const rootIndex = path.join(__dirname, 'index.html');
+  if (pathname === '/' && fs.existsSync(rootIndex)) {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    fs.createReadStream(rootIndex).pipe(res);
+    return;
+  }
+
   if (fs.existsSync(PUBLIC_DIR)) {
     let relativePath = pathname === '/' ? 'index.html' : pathname.replace(/^\//, '');
     let filePath = path.join(PUBLIC_DIR, relativePath);
