@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: chandramauli-erp-backend
+    env: node
+    plan: free
+    region: singapore
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: EXPECTED_APP_PACKAGE
+        value: com.chandramauli.erp
+      - key: EXPECTED_CERT_SHA256
+        value: D6:CD:70:C7:D5:F0:53:28:79:7D:28:16:79:0D:D0:36:12:C0:BA:BF:E1:A9:8F:5A:C7:5C:12:FE:12:0F:F9:2F
+      - key: EXPECTED_CERT_SHA1
+        value: B4:5F:83:E6:74:FC:07:35:98:69:8F:1E:CD:8B:B2:93:0E:3B:72:81
+      - key: ERP_SECURITY_ROOT_KEY
+        generateValue: true

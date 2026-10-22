@@ -402,6 +402,47 @@ CREATE TABLE IF NOT EXISTS request_nonces (
 CREATE INDEX IF NOT EXISTS idx_request_nonces_created ON request_nonces (created_at);
 
 -- ----------------------------------------------------------------------------------
+-- 8C. WHATSAPP AUTO-LINK BOT SESSIONS & ORDER NOTIFICATION QUEUE
+-- ----------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS whatsapp_sessions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id VARCHAR(100) NOT NULL UNIQUE DEFAULT 'default_session',
+    phone_number VARCHAR(50),
+    status VARCHAR(50) NOT NULL DEFAULT 'NOT_LINKED', -- 'NOT_LINKED', 'INITIALIZING', 'QR_READY', 'CONNECTED', 'DISCONNECTED', 'SESSION_EXPIRED', 'FAILED'
+    is_connected BOOLEAN DEFAULT FALSE,
+    connected_at TIMESTAMPTZ,
+    disconnected_at TIMESTAMPTZ,
+    disconnect_reason TEXT,
+    qr_code_raw TEXT,
+    pairing_code VARCHAR(20),
+    qr_expires_at TIMESTAMPTZ,
+    auth_state_data TEXT,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS whatsapp_notifications (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    idempotency_key VARCHAR(150) NOT NULL UNIQUE,
+    customer_id UUID REFERENCES customers(id) ON DELETE SET NULL,
+    bill_id UUID REFERENCES milling_bills(id) ON DELETE SET NULL,
+    customer_name VARCHAR(255),
+    recipient_phone VARCHAR(50) NOT NULL,
+    message_type VARCHAR(50) NOT NULL DEFAULT 'ORDER_COMPLETION', -- 'ORDER_COMPLETION', 'TEST', 'REMINDER'
+    message_body TEXT NOT NULL,
+    status VARCHAR(50) NOT NULL DEFAULT 'QUEUED', -- 'QUEUED', 'SENDING', 'SENT', 'FAILED', 'SKIPPED'
+    provider_message_id VARCHAR(150),
+    error_message TEXT,
+    retry_count INTEGER DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    sent_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_whatsapp_notif_phone ON whatsapp_notifications (recipient_phone);
+CREATE INDEX IF NOT EXISTS idx_whatsapp_notif_bill ON whatsapp_notifications (bill_id);
+CREATE INDEX IF NOT EXISTS idx_whatsapp_notif_status ON whatsapp_notifications (status);
+
+-- ----------------------------------------------------------------------------------
 -- 9. AUTOMATED LEDGER & BALANCE TRIGGERS
 -- ----------------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION recalc_customer_balance(cust_id UUID)
@@ -574,4 +615,14 @@ CREATE POLICY "Allow all backend device_keys" ON device_keys FOR ALL USING (true
 
 DROP POLICY IF EXISTS "Allow all backend request_nonces" ON request_nonces;
 CREATE POLICY "Allow all backend request_nonces" ON request_nonces FOR ALL USING (true) WITH CHECK (true);
+
+ALTER TABLE whatsapp_sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE whatsapp_notifications ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Allow all backend whatsapp_sessions" ON whatsapp_sessions;
+CREATE POLICY "Allow all backend whatsapp_sessions" ON whatsapp_sessions FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow all backend whatsapp_notifications" ON whatsapp_notifications;
+CREATE POLICY "Allow all backend whatsapp_notifications" ON whatsapp_notifications FOR ALL USING (true) WITH CHECK (true);
+
 

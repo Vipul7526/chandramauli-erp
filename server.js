@@ -7,7 +7,15 @@ require('dotenv').config();
 const http = require('http');
 const path = require('path');
 const fs = require('fs');
+const WebSocket = require('ws');
 const { handler } = require('./netlify/functions/api');
+
+let whatsappService = null;
+try {
+  whatsappService = require('./whatsapp/WhatsAppService');
+} catch (e) {
+  console.warn('[server.js] WhatsAppService load warning:', e.message);
+}
 
 const PORT = process.env.PORT || 5000;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -150,11 +158,29 @@ const server = http.createServer(async (req, res) => {
   res.end(JSON.stringify({ error: 'Not Found', path: pathname }));
 });
 
-server.listen(PORT, HOST, () => {
+// Attach WebSocket Server for Real-Time WhatsApp QR & Status Updates
+if (whatsappService) {
+  const wss = new WebSocket.Server({ server, path: '/api/whatsapp/socket' });
+  wss.on('connection', (ws) => {
+    whatsappService.registerWebSocketClient(ws);
+  });
+  console.log('📡 WhatsApp WebSocket Gateway attached at /api/whatsapp/socket');
+}
+
+server.listen(PORT, HOST, async () => {
   console.log(`=============================================================`);
   console.log(`🌾 Chandramauli Oil ERP - Localhost Full-Stack Server Ready!`);
   console.log(`💻 Web Application: http://localhost:${PORT}`);
   console.log(`📡 Backend API:     http://localhost:${PORT}/api/health`);
   console.log(`📱 Local Network:   http://${HOST}:${PORT}`);
   console.log(`=============================================================`);
+
+  if (whatsappService) {
+    try {
+      await whatsappService.init();
+      console.log('✅ WhatsApp Auto-Link Bot Engine Initialized Successfully');
+    } catch (err) {
+      console.error('⚠️ WhatsApp Engine Initialization Warning:', err.message);
+    }
+  }
 });
