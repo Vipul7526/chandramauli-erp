@@ -7,7 +7,7 @@
     "start": "node server.js",
     "dev": "node server.js",
     "build": "echo 'Build ready'",
-    "test": "node test_trust_engine.js && node test_whatsapp_service.js"
+    "test": "node test_trust_engine.js"
   },
   "keywords": [
     "chandramauli",
@@ -16,15 +16,11 @@
     "supabase",
     "netlify"
   ],
-  "author": "Chandramauli Oil Mill",
+  "author": "Prince Singh",
   "license": "ISC",
   "dependencies": {
     "@supabase/supabase-js": "^2.42.0",
-    "@whiskeysockets/baileys": "^7.0.0-rc14",
     "dotenv": "^16.4.5",
-    "nodemailer": "^10.1.7",
-    "pino": "^10.4.0",
-    "qrcode": "^1.5.4",
-    "ws": "^8.22.0"
+    "nodemailer": "^10.1.7"
   }
 }

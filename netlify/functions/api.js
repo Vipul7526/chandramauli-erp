@@ -243,8 +243,7 @@ exports.handler = async (event, context) => {
   // ---------------------------------------------------------------------------
   const isSensitiveMutation = ['POST', 'PUT', 'DELETE', 'PATCH'].includes(method) &&
     !path.startsWith('/auth/') &&
-    !path.startsWith('/security/') &&
-    !path.startsWith('/whatsapp/');
+    !path.startsWith('/security/');
 
   if (isSensitiveMutation && getHeader(event.headers, 'x-request-signature')) {
     const rawBody = event.body || '';
@@ -1366,118 +1365,6 @@ exports.handler = async (event, context) => {
       if (error) throw error;
 
       return jsonResponse(200, { success: true, message: 'Password has been reset successfully. Please log in.' });
-    }
-
-    // ---------------------------------------------------------------------------
-    // WHATSAPP AUTO-LINK BOT & ORDER NOTIFICATIONS
-    // ---------------------------------------------------------------------------
-    if (path === '/ready' && method === 'GET') {
-      let waStatus = { status: 'NOT_LINKED', isConnected: false };
-      try {
-        const waService = require('../../whatsapp/WhatsAppService');
-        waStatus = waService.getStatus();
-      } catch (_) {}
-      return jsonResponse(200, {
-        ready: true,
-        service: 'Chandramauli ERP Backend',
-        developer: 'Prince Singh',
-        whatsapp: waStatus,
-        timestamp: new Date().toISOString(),
-      });
-    }
-
-    if (path === '/whatsapp/status' && method === 'GET') {
-      try {
-        const waService = require('../../whatsapp/WhatsAppService');
-        return jsonResponse(200, waService.getStatus());
-      } catch (e) {
-        // Fallback to Supabase if running in serverless isolation
-        const { data } = await supabase.from('whatsapp_sessions').select('*').eq('session_id', 'default_session').maybeSingle();
-        return jsonResponse(200, {
-          provider: 'Baileys',
-          status: data?.status || 'NOT_LINKED',
-          isConnected: data?.is_connected || false,
-          connectedPhone: data?.phone_number || null,
-          pairingCode: data?.pairing_code || null,
-          qrRaw: data?.qr_code_raw || null,
-          expiresAt: data?.qr_expires_at ? new Date(data.qr_expires_at).getTime() : null,
-          timestamp: new Date().toISOString(),
-        });
-      }
-    }
-
-    if (path === '/whatsapp/link' && method === 'POST') {
-      try {
-        const waService = require('../../whatsapp/WhatsAppService');
-        await waService.startLinking({
-          usePairingCode: body.usePairingCode === true,
-          phoneNumber: body.phoneNumber,
-        });
-        return jsonResponse(200, {
-          success: true,
-          message: body.usePairingCode ? 'Pairing code generation initiated' : 'QR code generation initiated',
-          ...waService.getStatus(),
-        });
-      } catch (err) {
-        return jsonResponse(500, { error: 'Failed to initiate WhatsApp linking', message: err.message });
-      }
-    }
-
-    if (path === '/whatsapp/link/refresh' && method === 'POST') {
-      try {
-        const waService = require('../../whatsapp/WhatsAppService');
-        await waService.refreshLinking();
-        return jsonResponse(200, {
-          success: true,
-          message: 'WhatsApp linking refreshed with fresh 5-minute expiry',
-          ...waService.getStatus(),
-        });
-      } catch (err) {
-        return jsonResponse(500, { error: 'Failed to refresh WhatsApp linking', message: err.message });
-      }
-    }
-
-    if (path === '/whatsapp/disconnect' && method === 'POST') {
-      try {
-        const waService = require('../../whatsapp/WhatsAppService');
-        await waService.disconnect();
-        return jsonResponse(200, { success: true, message: 'WhatsApp session disconnected successfully' });
-      } catch (err) {
-        return jsonResponse(500, { error: 'Failed to disconnect WhatsApp', message: err.message });
-      }
-    }
-
-    if (path === '/whatsapp/test' && method === 'POST') {
-      const { phoneNumber, message } = body;
-      if (!phoneNumber) return jsonResponse(400, { error: 'phoneNumber is required for test message' });
-      try {
-        const waService = require('../../whatsapp/WhatsAppService');
-        const res = await waService.sendTestMessage(phoneNumber, message);
-        return jsonResponse(200, { success: true, ...res });
-      } catch (err) {
-        return jsonResponse(400, { error: err.message });
-      }
-    }
-
-    if (path === '/whatsapp/send-order-notification' && method === 'POST') {
-      try {
-        const waService = require('../../whatsapp/WhatsAppService');
-        const res = await waService.processOrderNotification(body);
-        return jsonResponse(200, res);
-      } catch (err) {
-        return jsonResponse(500, { error: 'Order notification failed', message: err.message });
-      }
-    }
-
-    if (path === '/whatsapp/notifications' && method === 'GET') {
-      try {
-        const waService = require('../../whatsapp/WhatsAppService');
-        const list = await waService.getNotifications(parseInt(query.limit || '30', 10));
-        return jsonResponse(200, { notifications: list });
-      } catch (err) {
-        const { data } = await supabase.from('whatsapp_notifications').select('*').order('created_at', { ascending: false }).limit(30);
-        return jsonResponse(200, { notifications: data || [] });
-      }
     }
 
     return jsonResponse(404, { error: `Endpoint not found: ${method} ${path}` });
