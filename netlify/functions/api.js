@@ -976,12 +976,11 @@ exports.handler = async (event, context) => {
     // 6. CUSTOMER LEDGER (Khatabook Debit/Credit)
     // -------------------------------------------------------------------------
     if (path === '/ledger') {
-      const { customer_id } = query;
-      if (!customer_id) {
-        return jsonResponse(400, { error: 'customer_id query param is required' });
-      }
-
       if (method === 'GET') {
+        const { customer_id } = query;
+        if (!customer_id) {
+          return jsonResponse(400, { error: 'customer_id query param is required' });
+        }
         const { data: customer, error: custErr } = await supabase
           .from('customers')
           .select('*')
@@ -1007,8 +1006,8 @@ exports.handler = async (event, context) => {
       }
 
       if (method === 'POST') {
-        const { customer_id: bodyCustId, amount, entry_type = 'CREDIT', payment_mode = 'CASH', description } = body;
-        const targetCustId = customer_id || bodyCustId;
+        const { customer_id: bodyCustId, amount, entry_type = 'CREDIT', payment_mode = 'CASH', description } = body || {};
+        const targetCustId = (body && body.customer_id) || query.customer_id || bodyCustId;
 
         if (!targetCustId || !amount) {
           return jsonResponse(400, { error: 'customer_id and amount are required' });
@@ -1350,10 +1349,31 @@ exports.handler = async (event, context) => {
     }
 
     if (path === '/auth/reset-password' && method === 'POST') {
-      const { email, new_password } = body;
+      const { email, otp, new_password } = body || {};
       if (!email || !new_password) return jsonResponse(400, { error: 'Email and new_password are required' });
+      if (!otp) return jsonResponse(400, { error: 'OTP code is required to reset password' });
 
       const cleanEmail = email.trim().toLowerCase();
+      const cleanOtp = otp.toString().trim();
+
+      // Strictly verify OTP from database
+      const { data: otpRecord, error: otpFetchErr } = await supabase
+        .from('app_otps')
+        .select('*')
+        .eq('email', cleanEmail)
+        .eq('otp_code', cleanOtp)
+        .eq('is_used', false)
+        .gt('expires_at', new Date().toISOString())
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (otpFetchErr || !otpRecord) {
+        return jsonResponse(400, { error: 'Invalid or expired OTP code. Password reset denied.' });
+      }
+
+      // Mark OTP as used immediately so it cannot be reused
+      await supabase.from('app_otps').update({ is_used: true }).eq('id', otpRecord.id);
 
       const { error } = await supabase
         .from('app_security')
